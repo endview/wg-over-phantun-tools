@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="0.15.0"
+SCRIPT_VERSION="0.15.1"
 PHANTUN_VERSION_DEFAULT="v0.8.1"
 
 IFACE="wgpt0"
@@ -1027,6 +1027,51 @@ detect_public_ipv4() {
     return 1
 }
 
+validate_ipv4_or_domain() {
+    local value=$1 label=$2
+    [[ -n "$value" ]] || die "${label} cannot be empty"
+    [[ "$value" != \[*\]* && "$value" != *:* ]] || die "${label} must be an IPv4 address or domain name; IPv6 Phantun endpoint is not supported by this script."
+    [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]] || die "Invalid ${label}: use an IPv4 address or domain name only"
+    if [[ "$value" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+        local a b c d
+        IFS=. read -r a b c d <<<"$value"
+        [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ && "$c" =~ ^[0-9]+$ && "$d" =~ ^[0-9]+$ ]] || die "Invalid ${label}: ${value}"
+        (( a >= 1 && a <= 223 && b >= 0 && b <= 255 && c >= 0 && c <= 255 && d >= 1 && d <= 254 )) || die "Invalid ${label}: ${value}"
+    fi
+}
+
+is_ipv4_literal() {
+    local value=$1
+    [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+is_non_public_ipv4() {
+    local value=$1
+    local a b c d
+    is_ipv4_literal "$value" || return 1
+    IFS=. read -r a b c d <<<"$value"
+    [[ "$a" =~ ^[0-9]+$ && "$b" =~ ^[0-9]+$ && "$c" =~ ^[0-9]+$ && "$d" =~ ^[0-9]+$ ]] || return 1
+    (( a == 10 )) && return 0
+    (( a == 127 )) && return 0
+    (( a == 169 && b == 254 )) && return 0
+    (( a == 172 && b >= 16 && b <= 31 )) && return 0
+    (( a == 192 && b == 168 )) && return 0
+    (( a == 100 && b >= 64 && b <= 127 )) && return 0
+    (( a == 192 && b == 0 && c == 2 )) && return 0
+    (( a == 198 && b == 51 && c == 100 )) && return 0
+    (( a == 203 && b == 0 && c == 113 )) && return 0
+    (( a == 0 )) && return 0
+    (( a >= 224 )) && return 0
+    return 1
+}
+
+warn_if_non_public_endpoint() {
+    local value=$1
+    if is_non_public_ipv4 "$value"; then
+        warn "B endpoint ${value} is not a public IPv4 address. Use it only when A can route to that private/internal address."
+    fi
+}
+
 safe_tun_name() {
     local prefix=$1 iface=$2 slug
     slug=$(printf '%s' "$iface" | tr -c 'A-Za-z0-9' '_' | cut -c1-10)
@@ -1678,6 +1723,8 @@ self_test() {
     bash -n "$script_path"
     awk '/^set -euo pipefail$/{if(++n==2) cap=1} cap{print} /^REMOTE_B_SETUP$/{exit}' "$script_path" | sed '$d' >"$remote_setup"
     bash -n "$remote_setup"
+    grep -q '^validate_ipv4_or_domain()' "$remote_setup" || die "Self-test failed: remote setup missing endpoint validator"
+    grep -q '^warn_if_non_public_endpoint()' "$remote_setup" || die "Self-test failed: remote setup missing endpoint warning helper"
     awk '/^set -euo pipefail$/{n++; if(n==3) cap=1} cap{print} /^REMOTE_B_DIAG$/{exit}' "$script_path" | sed '$d' >"$remote_diag"
     bash -n "$remote_diag"
     awk '/^set -euo pipefail$/{n++; if(n==4) cap=1} cap{print} /^REMOTE_B_CLEAN$/{exit}' "$script_path" | sed '$d' >"$remote_clean"
